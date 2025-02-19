@@ -19,17 +19,16 @@ class MyHomePageState extends State<MyHomePage> {
   EpubBook? _epubBook;
   int? _selectedChapterIndex;
 
-  // We'll store a list of word-lists, one for each chapter:
-  late List<List<String>> chapterWords = [];
-
-  // We'll store the total word count for each chapter:
-  late List<int> chapterWordCounts = [];
-
-  // We'll store the sum of all words in the book:
+  // We'll store a list of word-lists, one for each chapter
+  late List<List<String>> chapterWords;
+  late List<int> chapterWordCounts;
   int totalBookWords = 0;
 
-  // This is the user’s current word index in the current chapter:
+  // Current reading position in the current chapter
   int _currentChapterWordIndex = 0;
+
+  // We'll track the WPM in the parent so we can do time estimates
+  int _currentWpm = 300;
 
   @override
   void initState() {
@@ -41,11 +40,9 @@ class MyHomePageState extends State<MyHomePage> {
     setState(() => _isLoading = true);
 
     try {
-      // Load the book
       final book = await _epubService.loadEpub('assets/sample.epub');
       _epubBook = book;
 
-      // Build a word list for each chapter
       final chapters = book.Chapters ?? <EpubChapter>[];
       chapterWords = [];
       chapterWordCounts = [];
@@ -53,18 +50,20 @@ class MyHomePageState extends State<MyHomePage> {
 
       for (var chapter in chapters) {
         final chapterText = _epubService.extractChapterText(chapter);
-        final words = chapterText.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
+        final words = chapterText
+            .split(RegExp(r'\s+'))
+            .where((w) => w.isNotEmpty)
+            .toList();
 
         chapterWords.add(words);
         chapterWordCounts.add(words.length);
       }
 
-      // Sum them up for the entire book
-      totalBookWords = chapterWordCounts.fold(0, (sum, count) => sum + count);
+      totalBookWords = chapterWordCounts.fold(0, (sum, c) => sum + c);
 
-      // Select the first chapter by default (index 0)
+      // Default to the first chapter
       _selectedChapterIndex = 0;
-      _currentChapterWordIndex = 0; // start at 0
+      _currentChapterWordIndex = 0;
     } catch (e, stack) {
       debugPrint('Failed to load EPUB: $e\n$stack');
     } finally {
@@ -72,21 +71,28 @@ class MyHomePageState extends State<MyHomePage> {
     }
   }
 
-  // This is called when the RSVP widget reports a word index change.
-  // We'll store the new index, so we can compute progress bars.
+  // Called by the RSVP widget every time the user moves to the next word
   void _onWordIndexChanged(int newIndex) {
     setState(() {
       _currentChapterWordIndex = newIndex;
     });
   }
 
-  /// Builds the Drawer with the list of chapters so we can pick one.
+  // Called by the RSVP widget if speed changes
+  void _onWpmChanged(int newWpm) {
+    setState(() {
+      _currentWpm = newWpm;
+    });
+  }
+
+  // Chapter drawer to pick chapters
   Widget _buildChapterDrawer() {
     if (_epubBook == null) {
       return const Drawer(child: Center(child: Text('No chapters loaded')));
     }
 
     final chapters = _epubBook!.Chapters ?? <EpubChapter>[];
+
     return Drawer(
       child: ListView.builder(
         itemCount: chapters.length,
@@ -98,10 +104,9 @@ class MyHomePageState extends State<MyHomePage> {
             onTap: () {
               setState(() {
                 _selectedChapterIndex = index;
-                // reset current word index to 0 whenever we pick a new chapter
                 _currentChapterWordIndex = 0;
               });
-              Navigator.of(context).pop(); // Close drawer
+              Navigator.of(context).pop();
             },
           );
         },
@@ -109,7 +114,7 @@ class MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  /// Compute the fraction (0.0 to 1.0) for the current chapter progress.
+  // fraction (0..1) for the current chapter
   double get chapterProgress {
     if (_selectedChapterIndex == null) return 0.0;
     final chapterCount = chapterWordCounts[_selectedChapterIndex!];
@@ -117,22 +122,57 @@ class MyHomePageState extends State<MyHomePage> {
     return _currentChapterWordIndex / chapterCount;
   }
 
-  /// Compute the fraction for total book progress.
+  // fraction (0..1) for the entire book
   double get bookProgress {
     if (_selectedChapterIndex == null) return 0.0;
-    final chaptersSoFar = _selectedChapterIndex!; // number of completed chapters
+    final chaptersSoFar = _selectedChapterIndex!;
     final wordsBeforeThisChapter = chapterWordCounts
-        .take(chaptersSoFar) // sum of all chapters before the current one
-        .fold(0, (sum, count) => sum + count);
+        .take(chaptersSoFar)
+        .fold(0, (sum, c) => sum + c);
 
     final totalWordsRead = wordsBeforeThisChapter + _currentChapterWordIndex;
     if (totalBookWords == 0) return 0.0;
     return totalWordsRead / totalBookWords;
   }
 
+  // Estimate how long to finish the chapter at the current WPM
+  Duration get chapterTimeLeft {
+    if (_selectedChapterIndex == null) return Duration.zero;
+    final chapterCount = chapterWordCounts[_selectedChapterIndex!];
+    final wordsLeft = chapterCount - _currentChapterWordIndex;
+    if (_currentWpm == 0) return Duration.zero;
+
+    // wordsLeft / wpm = minutes, so multiply by 60 for seconds
+    final minutes = wordsLeft / _currentWpm;
+    final secs = (minutes * 60).round();
+    return Duration(seconds: secs);
+  }
+
+  // Estimate how long to finish the entire book at current WPM
+  Duration get bookTimeLeft {
+    if (_selectedChapterIndex == null) return Duration.zero;
+    final chaptersSoFar = _selectedChapterIndex!;
+    final wordsBeforeThisChapter = chapterWordCounts
+        .take(chaptersSoFar)
+        .fold(0, (sum, c) => sum + c);
+
+    final totalWordsRead = wordsBeforeThisChapter + _currentChapterWordIndex;
+    final wordsLeft = totalBookWords - totalWordsRead;
+    if (_currentWpm == 0) return Duration.zero;
+
+    final minutes = wordsLeft / _currentWpm;
+    final secs = (minutes * 60).round();
+    return Duration(seconds: secs);
+  }
+
+  String _formatDuration(Duration d) {
+    final hours = d.inHours;
+    final mins = d.inMinutes.remainder(60);
+    return "$hours:${mins.toString().padLeft(2, '0')}";
+  }
+
   @override
   Widget build(BuildContext context) {
-    // Loading spinner
     if (_isLoading) {
       return Scaffold(
         appBar: AppBar(title: const Text('RSVP Reader')),
@@ -140,7 +180,6 @@ class MyHomePageState extends State<MyHomePage> {
       );
     }
 
-    // If failed or still no data
     if (_epubBook == null || _selectedChapterIndex == null) {
       return Scaffold(
         appBar: AppBar(title: const Text('RSVP Reader')),
@@ -148,7 +187,6 @@ class MyHomePageState extends State<MyHomePage> {
       );
     }
 
-    // Get the words for the currently selected chapter
     final words = chapterWords[_selectedChapterIndex!];
 
     return Scaffold(
@@ -167,7 +205,9 @@ class MyHomePageState extends State<MyHomePage> {
             ),
           ),
           Text(
-            "Chapter progress: ${(chapterProgress * 100).toStringAsFixed(1)}%",
+            "Chapter progress: ${(chapterProgress * 100).toStringAsFixed(1)}%"
+            "\nTime left in chapter: ${_formatDuration(chapterTimeLeft)}",
+            textAlign: TextAlign.center,
             style: const TextStyle(fontSize: 14),
           ),
 
@@ -182,17 +222,20 @@ class MyHomePageState extends State<MyHomePage> {
             ),
           ),
           Text(
-            "Book progress: ${(bookProgress * 100).toStringAsFixed(1)}%",
+            "Book progress: ${(bookProgress * 100).toStringAsFixed(1)}%"
+            "\nTime left in book: ${_formatDuration(bookTimeLeft)}",
+            textAlign: TextAlign.center,
             style: const TextStyle(fontSize: 14),
           ),
 
-          // The actual RSVP widget
+          // The RSVP area
           Expanded(
             child: Center(
               child: RsvpReader(
                 words: words,
-                initialWpm: 300,
-                onWordIndexChanged: _onWordIndexChanged, // callback
+                initialWpm: _currentWpm,
+                onWordIndexChanged: _onWordIndexChanged,
+                onWpmChanged: _onWpmChanged,
               ),
             ),
           ),
